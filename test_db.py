@@ -158,6 +158,10 @@ class Query(object):
                 func = lambda o: value.lower() in getattr(o, key).lower()
             elif lookup == 'in':
                 func = lambda o: getattr(o, key) in value
+            elif lookup == 'lte':
+                func = lambda o: getattr(o, key) <= value
+            elif lookup == 'gte':
+                func = lambda o: getattr(o, key) >= value
             else:
                 next_level_func = self._get_filter_func(lookup, value)
                 func = lambda o: next_level_func(getattr(o, key))
