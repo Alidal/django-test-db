@@ -1,12 +1,23 @@
-from django.db.models.constants import LOOKUP_SEP
-from django.db.models.query import QuerySet as DjangoQuerySet
-from django.utils.tree import Node
+import mock
 
+from django.db.models.sql.constants import LOOKUP_SEP
+from django.db.models.query import QuerySet as DjangoQuerySet
+from django.utils.datastructures import SortedDict
+from django.utils.tree import Node
+from django.db.models.sql.datastructures import MultiJoin
+from django.core.exceptions import FieldError
+from django.db.models.sql import Query as DjangoQuery
+from collections import OrderedDict
+
+# Block access to database
+cursor_wrapper = mock.Mock()
+cursor_wrapper.side_effect = RuntimeError("No touching the database!")
+no_db_tests = mock.patch("django.db.backends.util.CursorWrapper", cursor_wrapper)
 
 data_store = {}
 
 
-class Query(object):
+class Query(DjangoQuery):
     """A replacement for Django's sql.Query object.
 
     Shares a similar API to django.db.models.sql.Query. It has its own data store.
@@ -21,6 +32,26 @@ class Query(object):
         self.where = []
         self.ordering = None
         self._empty = False
+        self._extra = None
+        self.aggregates = SortedDict()
+        self.select_fields = []
+
+        self.deferred_loading = (set(), True)
+        self.select = []
+        self.select_fields = []
+
+        self.aggregates = SortedDict()
+        self.aggregate_select_mask = None
+        self._aggregate_select_cache = None
+
+        self.extra = SortedDict()
+        self.extra_select_mask = None
+        self._extra_select_cache = None
+
+
+    def __str__(self):
+        return 'query'
+
 
     def execute(self):
         """Execute a query against the data store.
@@ -162,6 +193,10 @@ class Query(object):
                 func = lambda o: getattr(o, key) <= value
             elif lookup == 'gte':
                 func = lambda o: getattr(o, key) >= value
+            elif lookup == 'lt':
+                func = lambda o: getattr(o, key) < value
+            elif lookup == 'gt':
+                func = lambda o: getattr(o, key) > value
             else:
                 next_level_func = self._get_filter_func(lookup, value)
                 func = lambda o: next_level_func(getattr(o, key))
@@ -183,10 +218,25 @@ class Query(object):
             return lambda o: not func(o)
         return func
 
+    # Added Django functions
+    def add_fields(self, field_names, allow_m2m=True):
+        opts = self.get_meta()
+        try:
+            for name in field_names:
+                field = name.split(LOOKUP_SEP)
+                self.select_fields.append(field)
+        except MultiJoin:
+            raise FieldError("Invalid field name: '%s'" % name)
+        except FieldError:
+            names = opts.get_all_field_names() + self.extra.keys() + self.aggregate_select.keys()
+            names.sort()
+            raise FieldError("Cannot resolve keyword %r into field. "
+                    "Choices are: %s" % (name, ", ".join(names)))
+
 
 class QuerySet(DjangoQuerySet):
     """Subclass of Django's QuerySet to simplify some methods.
-    
+
     Generally speaking we try to use Django's qs for most methods, but some
     things are rather more complex than they need to be for our use cases.
     Consequently we simplify the execution functions to just call our Query
@@ -202,6 +252,10 @@ class QuerySet(DjangoQuerySet):
         return obj
 
     def get_or_create(self, **kwargs):
+        # TODO: Maybe fix
+        # Fix for ContentType get_or_create function
+        if 'defaults' in kwargs:
+            del kwargs['defaults']
         try:
             return self.get(**kwargs), False
         except self.model.DoesNotExist:
